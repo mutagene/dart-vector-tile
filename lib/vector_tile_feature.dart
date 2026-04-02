@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:math';
 
 import 'package:fixnum/fixnum.dart';
@@ -61,87 +62,52 @@ class VectorTileFeature {
     if (this.geometry != null) {
       return this.geometry as T?;
     }
-    this.decodeProperties();
 
     switch (this.type) {
       case VectorTileGeomType.POINT:
-        List<List<int>> coords = this.decodePoint();
+        final coords = this.decodePoint();
 
         if (coords.length <= 1) {
           this.geometry = Geometry.Point(
-              coordinates: coords[0]
-                  .map((intVal) => intVal.toDouble())
-                  .toList(growable: false));
+            coordinates: _toDoublePoint(coords[0]),
+          );
           this.geometryType = GeometryType.Point;
           break;
         }
 
-        this.geometry = Geometry.MultiPoint(
-            coordinates: coords
-                .map((coord) => coord
-                    .map((intVal) => intVal.toDouble())
-                    .toList(growable: false))
-                .toList(growable: false));
+        this.geometry = Geometry.MultiPoint(coordinates: _toDoubleLine(coords));
         this.geometryType = GeometryType.MultiPoint;
         break;
       case VectorTileGeomType.LINESTRING:
-        List<List<List<int>>> coords = this.decodeLineString();
+        final coords = this.decodeLineString();
 
         if (coords.length <= 1) {
           this.geometry = Geometry.LineString(
-              coordinates: coords[0]
-                  .map(
-                    (point) => point
-                        .map((intVal) => intVal.toDouble())
-                        .toList(growable: false),
-                  )
-                  .toList(growable: false));
+            coordinates: _toDoubleLine(coords[0]),
+          );
           this.geometryType = GeometryType.LineString;
           break;
         }
 
         this.geometry = Geometry.MultiLineString(
-            coordinates: coords
-                .map((line) => line
-                    .map(
-                      (point) => point
-                          .map((intVal) => intVal.toDouble())
-                          .toList(growable: false),
-                    )
-                    .toList(growable: false))
-                .toList(growable: false));
+          coordinates: _toDoublePolygon(coords),
+        );
         this.geometryType = GeometryType.MultiLineString;
         break;
       case VectorTileGeomType.POLYGON:
-        List<List<List<List<int>>>> coords = this.decodePolygon();
+        final coords = this.decodePolygon();
 
         if (coords.length <= 1) {
           this.geometry = Geometry.Polygon(
-              coordinates: coords[0]
-                  .map((ring) => ring
-                      .map(
-                        (point) => point
-                            .map((intVal) => intVal.toDouble())
-                            .toList(growable: false),
-                      )
-                      .toList(growable: false))
-                  .toList(growable: false));
+            coordinates: _toDoublePolygon(coords[0]),
+          );
           this.geometryType = GeometryType.Polygon;
           break;
         }
 
         this.geometry = Geometry.MultiPolygon(
-            coordinates: coords
-                .map((polygon) => polygon
-                    .map((ring) => ring
-                        .map(
-                          (point) => point
-                              .map((intVal) => intVal.toDouble())
-                              .toList(growable: false),
-                        )
-                        .toList(growable: false))
-                    .toList(growable: false))
-                .toList(growable: false));
+          coordinates: _toDoubleMultiPolygon(coords),
+        );
         this.geometryType = GeometryType.MultiPolygon;
         break;
       default:
@@ -155,18 +121,15 @@ class VectorTileFeature {
   ///
   /// Return key/value pairs
   Map<String, VectorTileValue> decodeProperties() {
-    if (this.properties != null) {
-      return this.properties!;
+    final existingProperties = this.properties;
+    if (existingProperties != null) {
+      return existingProperties;
     }
-    int length = this.tags.length;
-    Map<String, VectorTileValue> properties = {};
-
-    for (int i = 0; i < length; i += 2) {
-      int keyIndex = this.tags[i];
-      int valueIndex = this.tags[i + 1];
-
-      properties[this.keys![keyIndex]] = this.values![valueIndex];
-    }
+    final properties = _FeaturePropertiesMap(
+      tags: this.tags,
+      keys: this.keys ?? const <String>[],
+      values: this.values ?? const <VectorTileValue>[],
+    );
 
     this.properties = properties;
     return properties;
@@ -176,20 +139,23 @@ class VectorTileFeature {
   ///
   /// @docs: https://github.com/mapbox/vector-tile-spec/tree/master/2.1#4342-point-geometry-type
   List<List<int>> decodePoint() {
-    int length = 0;
-    int commandId = 0;
-    int x = 0;
-    int y = 0;
-    bool isX = true;
-    List<List<int>> coords = [];
-    List<int> point = [];
+    final geometryList = this.geometryList;
+    if (geometryList == null) {
+      return [];
+    }
 
-    for (final commandInt in this.geometryList ?? []) {
+    var length = 0;
+    var commandId = 0;
+    var x = 0;
+    var y = 0;
+    var isX = true;
+    final coords = <List<int>>[];
+
+    for (var i = 0; i < geometryList.length; i += 1) {
+      final commandInt = geometryList[i];
       if (length <= 0) {
-        Command command = Command.CommandInteger(command: commandInt);
-
-        commandId = command.id;
-        length = command.count;
+        commandId = Command.decodeId(commandInt);
+        length = Command.decodeCount(commandInt);
       } else if (commandId != CommandID.ClosePath) {
         if (isX) {
           x += Command.zigZagDecode(commandInt);
@@ -210,20 +176,24 @@ class VectorTileFeature {
   ///
   /// @docs: https://github.com/mapbox/vector-tile-spec/tree/master/2.1#4343-linestring-geometry-type
   List<List<List<int>>> decodeLineString() {
-    int length = 0;
-    int commandId = 0;
-    int x = 0;
-    int y = 0;
-    bool isX = true;
-    List<List<List<int>>> coords = [];
-    List<List<int>> ring = [];
+    final geometryList = this.geometryList;
+    if (geometryList == null) {
+      return [];
+    }
 
-    for (final commandInt in this.geometryList ?? []) {
+    var length = 0;
+    var commandId = 0;
+    var x = 0;
+    var y = 0;
+    var isX = true;
+    final coords = <List<List<int>>>[];
+    var ring = <List<int>>[];
+
+    for (var i = 0; i < geometryList.length; i += 1) {
+      final commandInt = geometryList[i];
       if (length <= 0) {
-        Command command = Command.CommandInteger(command: commandInt);
-
-        commandId = command.id;
-        length = command.count;
+        commandId = Command.decodeId(commandInt);
+        length = Command.decodeCount(commandInt);
       } else if (commandId != CommandID.ClosePath) {
         if (isX) {
           x += Command.zigZagDecode(commandInt);
@@ -249,39 +219,40 @@ class VectorTileFeature {
   ///
   /// @docs: https://github.com/mapbox/vector-tile-spec/tree/master/2.1#4344-polygon-geometry-type
   List<List<List<List<int>>>> decodePolygon() {
-    int length = 0;
-    int commandId = 0;
-    int x = 0;
-    int y = 0;
-    bool isX = true;
-    List<List<List<List<int>>>> polygons = [];
-    List<List<List<int>>> coords = [];
-    List<List<int>> ring = [];
+    final geometryList = this.geometryList;
+    if (geometryList == null) {
+      return [];
+    }
 
-    for (final commandInt in this.geometryList ?? []) {
-      if (length <= 0 || commandId == CommandID.ClosePath) {
-        Command command = Command.CommandInteger(command: commandInt);
+    var x = 0;
+    var y = 0;
+    final polygons = <List<List<List<int>>>>[];
+    var coords = <List<List<int>>>[];
+    var ring = <List<int>>[];
 
-        commandId = command.id;
-        length = command.count;
+    for (var i = 0; i < geometryList.length;) {
+      final commandInt = geometryList[i];
+      i += 1;
 
-        if (commandId == CommandID.ClosePath) {
+      final commandId = Command.decodeId(commandInt);
+      final commandCount = Command.decodeCount(commandInt);
+
+      if (commandId == CommandID.ClosePath) {
+        for (var j = 0; j < commandCount; j += 1) {
           coords.add(ring.reversed.toList(growable: false));
           ring = [];
         }
-      } else if (commandId != CommandID.ClosePath) {
-        if (isX) {
-          x += Command.zigZagDecode(commandInt);
-          isX = false;
-        } else {
-          y += Command.zigZagDecode(commandInt);
-          ring.add([x, y]);
-          length -= 1;
-          isX = true;
-        }
+        continue;
       }
 
-      if (length <= 0 && commandId == CommandID.LineTo) {
+      for (var j = 0; j < commandCount; j += 1) {
+        x += Command.zigZagDecode(geometryList[i]);
+        y += Command.zigZagDecode(geometryList[i + 1]);
+        i += 2;
+        ring.add([x, y]);
+      }
+
+      if (commandId == CommandID.LineTo) {
         if (coords.isNotEmpty && this._isCCW(ring: ring)) {
           polygons.add(coords);
           coords = [];
@@ -309,8 +280,11 @@ class VectorTileFeature {
   ///     var geojson = feature.toGeoJson(3262, 1923, 12);
   ///     var coordinates = (geojson as GeoJsonPoint).geometry.coordinates;
   ///    ```
-  T? toGeoJson<T extends GeoJson>(
-      {required int x, required int y, required int z}) {
+  T? toGeoJson<T extends GeoJson>({
+    required int x,
+    required int y,
+    required int z,
+  }) {
     if (this.geometry == null) {
       this.decodeGeometry();
     }
@@ -338,43 +312,64 @@ class VectorTileFeature {
   ///     var geojson = feature.toGeoJson(3262, 1923, 12);
   ///     var coordinates = (geojson as GeoJsonPoint).geometry.coordinates;
   ///    ```
-  T? toGeoJsonWithExtentCalculated<T extends GeoJson>(
-      {required int x0, required int y0, required int size}) {
+  T? toGeoJsonWithExtentCalculated<T extends GeoJson>({
+    required int x0,
+    required int y0,
+    required int size,
+  }) {
     if (this.geometry == null) {
       this.decodeGeometry();
+    }
+    if (this.properties == null) {
+      this.decodeProperties();
     }
 
     switch (this.geometryType) {
       case GeometryType.Point:
         final geometryPoint = this.geometry as GeometryPoint;
 
-        geometryPoint.coordinates =
-            this._projectPoint(size, x0, y0, geometryPoint.coordinates);
+        geometryPoint.coordinates = this._projectPoint(
+          size,
+          x0,
+          y0,
+          geometryPoint.coordinates,
+        );
 
         return GeoJsonPoint(
-          geometry: geometryPoint,
-          properties: this.properties,
-        ) as T;
+              geometry: geometryPoint,
+              properties: this.properties,
+            )
+            as T;
       case GeometryType.MultiPoint:
         final geometryMultiPoint = this.geometry as GeometryMultiPoint;
 
-        geometryMultiPoint.coordinates =
-            this._project(size, x0, y0, geometryMultiPoint.coordinates);
+        geometryMultiPoint.coordinates = this._project(
+          size,
+          x0,
+          y0,
+          geometryMultiPoint.coordinates,
+        );
 
         return GeoJsonMultiPoint(
-          geometry: geometryMultiPoint,
-          properties: this.properties,
-        ) as T;
+              geometry: geometryMultiPoint,
+              properties: this.properties,
+            )
+            as T;
       case GeometryType.LineString:
         final geometryLineString = this.geometry as GeometryLineString;
 
-        geometryLineString.coordinates =
-            this._project(size, x0, y0, geometryLineString.coordinates);
+        geometryLineString.coordinates = this._project(
+          size,
+          x0,
+          y0,
+          geometryLineString.coordinates,
+        );
 
         return GeoJsonLineString(
-          geometry: geometryLineString,
-          properties: this.properties,
-        ) as T;
+              geometry: geometryLineString,
+              properties: this.properties,
+            )
+            as T;
 
       case GeometryType.MultiLineString:
         final geometryLineString = this.geometry as GeometryMultiLineString;
@@ -384,9 +379,10 @@ class VectorTileFeature {
             .toList(growable: false);
 
         return GeoJsonMultiLineString(
-          geometry: geometryLineString,
-          properties: this.properties,
-        ) as T;
+              geometry: geometryLineString,
+              properties: this.properties,
+            )
+            as T;
       case GeometryType.Polygon:
         final geometryPolygon = this.geometry as GeometryPolygon;
 
@@ -395,22 +391,26 @@ class VectorTileFeature {
             .toList(growable: false);
 
         return GeoJsonPolygon(
-          geometry: geometryPolygon,
-          properties: this.properties,
-        ) as T;
+              geometry: geometryPolygon,
+              properties: this.properties,
+            )
+            as T;
       case GeometryType.MultiPolygon:
         final geometryMultiPolygon = this.geometry as GeometryMultiPolygon;
 
         geometryMultiPolygon.coordinates = geometryMultiPolygon.coordinates
-            ?.map((polygon) => polygon
-                .map((ring) => this._project(size, x0, y0, ring))
-                .toList(growable: false))
+            ?.map(
+              (polygon) => polygon
+                  .map((ring) => this._project(size, x0, y0, ring))
+                  .toList(growable: false),
+            )
             .toList(growable: false);
 
         return GeoJsonMultiPolygon(
-          geometry: geometryMultiPolygon,
-          properties: this.properties,
-        ) as T;
+              geometry: geometryMultiPolygon,
+              properties: this.properties,
+            )
+            as T;
       default:
     }
 
@@ -418,7 +418,12 @@ class VectorTileFeature {
   }
 
   /// Convert list of point into lon/lat points
-  List<List<double>> _project(num size, num x0, num y0, List<List<double>> line) {
+  List<List<double>> _project(
+    num size,
+    num x0,
+    num y0,
+    List<List<double>> line,
+  ) {
     // Deep clone
     List<List<double>> result = line
         .map((point) => point.map((val) => val).toList(growable: false))
@@ -441,7 +446,7 @@ class VectorTileFeature {
 
     return [
       (point[0] + x0) * 360 / size - 180,
-      360 / pi * atan(exp(y2 * pi / 180)) - 90
+      360 / pi * atan(exp(y2 * pi / 180)) - 90,
     ];
   }
 
@@ -454,4 +459,131 @@ class VectorTileFeature {
     }
     return sum < 0;
   }
+}
+
+class _FeaturePropertiesMap extends MapBase<String, VectorTileValue> {
+  final List<int> _tags;
+  final List<String> _keys;
+  final List<VectorTileValue> _values;
+  Map<String, VectorTileValue>? _materialized;
+
+  _FeaturePropertiesMap({
+    required List<int> tags,
+    required List<String> keys,
+    required List<VectorTileValue> values,
+  }) : _tags = tags,
+       _keys = keys,
+       _values = values;
+
+  @override
+  VectorTileValue? operator [](Object? key) {
+    final materialized = _materialized;
+    if (materialized != null) {
+      return materialized[key];
+    }
+    if (key is! String) {
+      return null;
+    }
+
+    for (var i = _tags.length - 2; i >= 0; i -= 2) {
+      if (_keys[_tags[i]] == key) {
+        return _values[_tags[i + 1]];
+      }
+    }
+    return null;
+  }
+
+  @override
+  void operator []=(String key, VectorTileValue value) {
+    _ensureMaterialized()[key] = value;
+  }
+
+  @override
+  void clear() {
+    _ensureMaterialized().clear();
+  }
+
+  @override
+  Iterable<String> get keys {
+    return _ensureMaterialized().keys;
+  }
+
+  @override
+  int get length {
+    final materialized = _materialized;
+    if (materialized != null) {
+      return materialized.length;
+    }
+    return _tags.length ~/ 2;
+  }
+
+  @override
+  bool get isEmpty {
+    final materialized = _materialized;
+    if (materialized != null) {
+      return materialized.isEmpty;
+    }
+    return _tags.isEmpty;
+  }
+
+  @override
+  VectorTileValue? remove(Object? key) {
+    return _ensureMaterialized().remove(key);
+  }
+
+  Map<String, VectorTileValue> _ensureMaterialized() {
+    final materialized = _materialized;
+    if (materialized != null) {
+      return materialized;
+    }
+
+    final properties = <String, VectorTileValue>{};
+    for (var i = 0; i < _tags.length; i += 2) {
+      properties[_keys[_tags[i]]] = _values[_tags[i + 1]];
+    }
+    _materialized = properties;
+    return properties;
+  }
+}
+
+List<double> _toDoublePoint(List<int> point) {
+  return [point[0].toDouble(), point[1].toDouble()];
+}
+
+List<List<double>> _toDoubleLine(List<List<int>> line) {
+  final result = List<List<double>>.filled(
+    line.length,
+    const <double>[],
+    growable: false,
+  );
+  for (var i = 0; i < line.length; i += 1) {
+    result[i] = _toDoublePoint(line[i]);
+  }
+  return result;
+}
+
+List<List<List<double>>> _toDoublePolygon(List<List<List<int>>> polygon) {
+  final result = List<List<List<double>>>.filled(
+    polygon.length,
+    const <List<double>>[],
+    growable: false,
+  );
+  for (var i = 0; i < polygon.length; i += 1) {
+    result[i] = _toDoubleLine(polygon[i]);
+  }
+  return result;
+}
+
+List<List<List<List<double>>>> _toDoubleMultiPolygon(
+  List<List<List<List<int>>>> multiPolygon,
+) {
+  final result = List<List<List<List<double>>>>.filled(
+    multiPolygon.length,
+    const <List<List<double>>>[],
+    growable: false,
+  );
+  for (var i = 0; i < multiPolygon.length; i += 1) {
+    result[i] = _toDoublePolygon(multiPolygon[i]);
+  }
+  return result;
 }
